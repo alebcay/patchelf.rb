@@ -73,12 +73,12 @@ module PatchELF
     private
 
     def fgap_method?
-      idx = find_gap { |prv, nxt| nxt.file_head - prv.file_tail }
+      idx = find_gap { |prv, nxt| fgap_size(prv, nxt) }
       return false if idx.nil?
 
       loads = load_segments
       # prefer extend backwardly
-      return extend_backward?(loads[idx - 1]) if writable?(loads[idx - 1])
+      return extend_backward?(loads[idx - 1]) if backward_growth_possible?(loads[idx - 1], loads[idx])
 
       extend_forward?(loads[idx])
     end
@@ -106,13 +106,7 @@ module PatchELF
       # |  1      | |  2  |
       # |  1      |    |  2  |
       extension = PatchELF::Helper.alignup(@request_size, page_size)
-      idx = find_gap(check_sz: false) do |prv, nxt|
-        gap = PatchELF::Helper.aligndown(nxt.mem_head, page_size) - prv.mem_tail
-        # Forward growth moves the entire mapping back by the rounded extension.
-        next 0 if !writable?(prv) && gap < extension
-
-        gap
-      end
+      idx = find_gap(check_sz: false) { |prv, nxt| mgap_size(prv, nxt, extension) }
       return false if idx.nil?
 
       loads = load_segments
@@ -120,7 +114,8 @@ module PatchELF
       @extend_size = extension
       shift_attributes
       # prefer backward than forward
-      return extend_backward?(loads[idx - 1]) if writable?(loads[idx - 1])
+      return extend_backward?(loads[idx - 1]) if writable?(loads[idx - 1]) &&
+                                                 backward_growth_allowed?(loads[idx - 1])
 
       # NOTE: loads[idx].file_head has been changed in shift_attributes
       extend_forward?(loads[idx], @extend_size)
@@ -148,6 +143,37 @@ module PatchELF
 
     def writable?(seg)
       seg.readable? && seg.writable?
+    end
+
+    def backward_growth_allowed?(seg)
+      seg.header.p_memsz == seg.header.p_filesz
+    end
+
+    def backward_growth_possible?(prv, nxt)
+      writable?(prv) && backward_growth_allowed?(prv) &&
+        PatchELF::Helper.aligndown(nxt.mem_head, page_size) - prv.mem_tail >= @request_size
+    end
+
+    def fgap_size(prv, nxt)
+      file_gap = nxt.file_head - prv.file_tail
+      return file_gap if file_gap.negative?
+      return file_gap if backward_growth_possible?(prv, nxt)
+
+      # Forward growth moves the next mapping into the preceding page.
+      return 0 unless writable?(nxt) &&
+                      PatchELF::Helper.aligndown(nxt.mem_head - @request_size, page_size) >= prv.mem_tail
+
+      file_gap
+    end
+
+    def mgap_size(prv, nxt, extension)
+      gap = PatchELF::Helper.aligndown(nxt.mem_head, page_size) - prv.mem_tail
+      return gap if writable?(prv) && backward_growth_allowed?(prv)
+
+      # Forward growth moves the entire mapping back by the rounded extension.
+      return 0 unless writable?(nxt) && gap >= extension
+
+      gap
     end
 
     # For all attributes >= threshold, += offset
