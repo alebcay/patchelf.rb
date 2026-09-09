@@ -150,6 +150,65 @@ describe PatchELF::MM do
   end
 
   describe 'extend backwardly' do
+    it 'uses forward growth when the previous LOAD has a BSS area' do
+      loads = [
+        make_load(0, 0x100, 0x1000, 0x200, 'rw'),
+        make_load(0x200, 0x100, 0x3000, 0x100, 'rw')
+      ]
+      test_dispatch(0x20, loads) do |off, vaddr|
+        expect(off).to be 0x1e0
+        expect(vaddr).to be 0x2fe0
+      end
+      expect(loads[0].file_tail).to be 0x100
+      expect(loads[0].mem_tail).to be 0x1200
+      expect(loads[1].file_head).to be 0x1e0
+    end
+
+    it 'rejects a file gap when the virtual gap is too small' do
+      loads = [
+        make_load(0, 0x100, 0x1000, 0x200, 'rw'),
+        make_load(0x200, 0x100, 0x1210, 0x100, 'rw')
+      ]
+      headers = loads.map { |seg| seg.header.to_binary_s }
+      callback = double('callback')
+      expect(callback).not_to receive(:call)
+
+      expect do
+        test_dispatch(0x20, loads) { |*args| callback.call(*args) }
+      end.to raise_error(NotImplementedError)
+      expect(loads.map { |seg| seg.header.to_binary_s }).to eq headers
+    end
+
+    it 'rejects backward growth into the next LOAD aligned page' do
+      loads = [
+        make_load(0, 0x800, 0x1000, 0x800, 'rw'),
+        make_load(0x1200, 0x100, 0x2800, 0x100, 'r')
+      ]
+      headers = loads.map { |seg| seg.header.to_binary_s }
+      callback = double('callback')
+      expect(callback).not_to receive(:call)
+
+      expect do
+        test_dispatch(0x900, loads) { |*args| callback.call(*args) }
+      end.to raise_error(NotImplementedError)
+      expect(loads.map { |seg| seg.header.to_binary_s }).to eq headers
+    end
+
+    it 'rejects forward growth that enters the previous LOAD page' do
+      loads = [
+        make_load(0, 0x100, 0x1000, 0x1800, 'rw'),
+        make_load(0x200, 0x100, 0x3000, 0x100, 'rw')
+      ]
+      headers = loads.map { |seg| seg.header.to_binary_s }
+      callback = double('callback')
+      expect(callback).not_to receive(:call)
+
+      expect do
+        test_dispatch(0x100, loads) { |*args| callback.call(*args) }
+      end.to raise_error(NotImplementedError)
+      expect(loads.map { |seg| seg.header.to_binary_s }).to eq headers
+    end
+
     it 'fgap' do
       loads = [make_load(0, 0x666, 0x1000, 0x666, 'rwx'), make_load(0x668, 8, 0x2668, 8, 'rw')]
       called = 0
@@ -180,6 +239,49 @@ describe PatchELF::MM do
       test_dispatch(0x200, loads)
       expect(loads[0].file_tail).to be 0xa66
       expect(loads[1].file_head).to be 0x1668
+    end
+
+    it 'does not use an m-gap when the previous LOAD has a BSS area' do
+      loads = [
+        make_load(0, 0x100, 0x1000, 0x200, 'rw'),
+        make_load(0x200, 0x100, 0x3000, 0x100, 'r')
+      ]
+      headers = loads.map { |seg| seg.header.to_binary_s }
+      callback = double('callback')
+      expect(callback).not_to receive(:call)
+
+      expect do
+        test_dispatch(0x200, loads) { |*args| callback.call(*args) }
+      end.to raise_error(NotImplementedError)
+      expect(loads.map { |seg| seg.header.to_binary_s }).to eq headers
+    end
+
+    it 'rejects an m-gap that fits the request but not the extension' do
+      loads = [
+        make_load(0, 0x100, 0x1000, 0x200, 'rw'),
+        make_load(0x100, 0x100, 0x2e00, 0x100, 'rw')
+      ]
+      headers = loads.map { |seg| seg.header.to_binary_s }
+      callback = double('callback')
+      expect(callback).not_to receive(:call)
+
+      expect do
+        test_dispatch(0x800, loads) { |*args| callback.call(*args) }
+      end.to raise_error(NotImplementedError)
+      expect(loads.map { |seg| seg.header.to_binary_s }).to eq headers
+    end
+
+    it 'uses forward growth when the full m-gap extension fits' do
+      loads = [
+        make_load(0, 0x100, 0x1000, 0x200, 'rw'),
+        make_load(0x100, 0x100, 0x4000, 0x100, 'rw')
+      ]
+      test_dispatch(0x200, loads) do |off, vaddr|
+        expect(off).to be 0x100
+        expect(vaddr).to be 0x3000
+      end
+      expect(loads[0].mem_tail).to be 0x1200
+      expect(loads[1].mem_head).to be 0x3000
     end
   end
 
